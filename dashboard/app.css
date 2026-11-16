@@ -151,3 +151,96 @@ tbody tr[data-selected="true"] { background: rgba(45, 212, 167, 0.08); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* New in radar-2: the export strip, the compare picker column and the
+   side-by-side panel. Same palette, same radii, same type steps. */
+.toolstrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--step-3);
+  padding: var(--step-3) 0 var(--step-4);
+  border-top: 1px solid var(--border);
+}
+.toolstrip .sub {
+  flex: 1 1 auto;
+}
+.compare-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+.compare-cell {
+  width: 44px;
+  text-align: center;
+}
+.compare-cell input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.compare-panel {
+  margin-top: var(--step-4);
+  padding: var(--step-5);
+  display: grid;
+  gap: var(--step-4);
+}
+.compare-empty {
+  margin-top: var(--step-4);
+  padding: var(--step-5);
+  display: grid;
+  gap: var(--step-2);
+}
+.compare-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--step-3);
+  flex-wrap: wrap;
+}
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--step-4);
+  align-items: start;
+}
+.compare-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--canvas);
+  padding: var(--step-4);
+  display: grid;
+  gap: var(--step-3);
+}
+.compare-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--step-3);
+}
+.compare-head h3 {
+  margin-top: var(--step-1);
+}
+.compare-figures {
+  display: grid;
+  gap: var(--step-2);
+}
+.compare-figure {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--step-3);
+  font-size: 13px;
+}
+.compare-figure span {
+  color: var(--muted);
+}
+.compare-figure b {
+  font-weight: 500;
+  text-align: right;
+}
+.compare-waiting {
+  align-content: center;
+  min-height: 220px;
+}

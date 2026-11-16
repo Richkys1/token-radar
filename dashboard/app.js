@@ -11,6 +11,161 @@
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', watchlistOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null, sandbox: false, growthWeight: DATA.model.growth_weight, maturityFloor: DATA.model.maturity_floor };
 
+  // Two rows a reader wants to hold next to each other, by slug, oldest first.
+  var pickedForCompare = [];
+
+  function csvSafe(value) {
+    var text = value === null || value === undefined ? '' : String(value);
+    if (text.indexOf(',') < 0 && text.indexOf('"') < 0 && text.indexOf('\n') < 0) return text;
+    return '"' + text.split('"').join('""') + '"';
+  }
+
+  function boardCsvText() {
+    var head = ['rank', 'slug', 'name', 'category', 'chains', 'tvl_usd', 'implied_value_usd', 'category_multiple', 'multiple_source', 'growth_multiplier', 'maturity_multiplier', 'breadth_multiplier', 'watchlist'];
+    var lines = [head.join(',')];
+    DATA.rows.slice().sort(function (a, b) { return a.rank - b.rank; }).forEach(function (r) {
+      lines.push([
+        r.rank,
+        csvSafe(r.slug),
+        csvSafe(r.name),
+        csvSafe(r.category || 'Other'),
+        csvSafe((r.chains || []).join('; ')),
+        r.tvl_usd,
+        r.implied_value_usd,
+        r.category_multiple,
+        csvSafe(r.multiple_source),
+        r.growth_multiplier,
+        r.maturity_multiplier,
+        r.breadth_multiplier,
+        isWatchlist(r) ? 'yes' : 'no'
+      ].join(','));
+    });
+    return lines.join('\n') + '\n';
+  }
+
+  function saveBoardCsv() {
+    var blob = new Blob([boardCsvText()], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'token-radar-board.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  // A header click walks its column up, then down, then hands the board back
+  // to rank order, so the reader can always find the published ranking again.
+  function cycleSort(key) {
+    if (state.sort !== key) {
+      state.sort = key;
+      state.dir = 1;
+    } else if (state.dir === 1) {
+      state.dir = -1;
+    } else if (key === 'implied') {
+      state.dir = 1;
+    } else {
+      state.sort = 'implied';
+      state.dir = -1;
+    }
+    render(); // the board redraws from the new order
+  }
+
+  function compareRow(slug) {
+    var found = null;
+    DATA.rows.forEach(function (r) { if (r.slug === slug) found = r; });
+    return found;
+  }
+
+  function toggleCompare(slug, want) {
+    var at = pickedForCompare.indexOf(slug);
+    if (want && at < 0) {
+      pickedForCompare.push(slug);
+      if (pickedForCompare.length > 2) pickedForCompare.shift();
+    } else if (!want && at >= 0) {
+      pickedForCompare.splice(at, 1);
+    }
+    render(); // the tick and the panel stay in step
+  }
+
+  function compareTick(slug) {
+    var box = el('input', {
+      type: 'checkbox',
+      'aria-label': 'Compare ' + slug,
+      checked: pickedForCompare.indexOf(slug) >= 0 ? 'checked' : null,
+      onclick: function (e) { e.stopPropagation(); },
+      onkeydown: function (e) { e.stopPropagation(); },
+      onchange: function (e) { toggleCompare(slug, e.target.checked); }
+    });
+    return box;
+  }
+
+  function compareFigure(label, value) {
+    return el('div', { class: 'compare-figure' }, el('span', { text: label }), el('b', { class: 'num', text: value }));
+  }
+
+  function multipleNote(r) {
+    if (r.multiple_source === 'category') return 'median of ' + r.comps_used + ' live ' + (r.category || 'Other') + ' protocols';
+    return 'global median across ' + DATA.live_total + ' live protocols';
+  }
+
+  function compareCard(slug) {
+    var r = compareRow(slug);
+    if (!r) return el('div', { class: 'compare-card' }, el('p', { class: 'sub', text: 'That protocol is not on this board.' }));
+    var steps = farmSteps(r);
+    return el('div', { class: 'compare-card' },
+      el('div', { class: 'compare-head' },
+        el('div', null,
+          el('span', { class: 'brand-name', text: 'Rank ' + r.rank + (isWatchlist(r) ? ' · watchlist' : ' · early radar') }),
+          el('h3', { text: r.name })
+        ),
+        el('button', { class: 'button', type: 'button', text: 'Remove', onclick: function () { toggleCompare(slug, false); } })
+      ),
+      el('div', { class: 'compare-figures' },
+        compareFigure('Implied value', fmtUsd(r.implied_value_usd)),
+        compareFigure('TVL', fmtUsd(r.tvl_usd)),
+        compareFigure('Category multiple', fmtMult(r.category_multiple)),
+        compareFigure('Multiple source', multipleNote(r)),
+        compareFigure('Growth multiplier', String(r.growth_multiplier)),
+        compareFigure('Maturity multiplier', String(r.maturity_multiplier)),
+        compareFigure('Breadth multiplier', String(r.breadth_multiplier)),
+        compareFigure('Age with no token', fmtAge(r.age_days))
+      ),
+      el('h3', { text: 'Farm plan' }),
+      el('ol', { class: 'steps' }, steps.map(function (s) { return el('li', { text: s }); }))
+    );
+  }
+
+  function comparePanel() {
+    var picked = pickedForCompare.map(compareRow).filter(function (r) { return !!r; });
+    if (picked.length === 0) {
+      return el('section', { class: 'panel compare-empty' },
+        el('h2', { text: 'Compare two protocols' }),
+        el('p', { class: 'sub', text: 'Tick the box at the start of any two board rows and they appear here side by side, with their model figures and farm plans, so you can judge which one deserves the capital first.' })
+      );
+    }
+    var cards = picked.map(function (r) { return compareCard(r.slug); });
+    if (picked.length === 1) cards.push(el('div', { class: 'compare-card compare-waiting' }, el('p', { class: 'sub', text: 'One more tick fills this side: pick a second row from the board to set it against ' + picked[0].name + '.' })));
+    return el('section', { class: 'panel compare-panel' },
+      el('div', { class: 'compare-title' },
+        el('h2', { text: picked.length === 2 ? 'Side by side: ' + picked[0].name + ' vs ' + picked[1].name : 'Side by side' }),
+        el('button', { class: 'button', type: 'button', text: 'Clear compare', onclick: function () { pickedForCompare = []; render(); } })
+      ),
+      el('div', { class: 'compare-grid' }, cards)
+    );
+  }
+
+  function toolStrip() {
+    var chosen = pickedForCompare.length;
+    var hint = chosen === 0 ? 'No protocols picked to compare yet.' : chosen === 1 ? 'One protocol picked: tick a second row to compare.' : 'Two protocols picked: see them side by side below the board.';
+    return el('div', { class: 'toolstrip' },
+      el('button', { class: 'button primary', type: 'button', text: 'Download board as CSV', onclick: function () { saveBoardCsv(); } }),
+      el('span', { class: 'sub', text: 'Every row, in rank order, with its model figures.' }),
+      el('span', { class: 'compare-count', text: hint })
+    );
+  }
+
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
@@ -227,7 +382,7 @@
 
   function sortHeader(key, label) {
     return el('th', { scope: 'col' },
-      el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
+      el('button', { type: 'button', onclick: function () { cycleSort(key); } },
         label,
         state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
       )
@@ -257,6 +412,7 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
+        el('td', { class: 'compare-cell' }, compareTick(r.slug)),
         el('td', { class: 'num', text: rankLabel }),
         el('td', null, el('div', { class: 'name' },
           el('b', { text: r.name }),
@@ -279,6 +435,7 @@
         el('table', null,
           el('caption', { class: 'sub', text: (state.sandbox ? 'Sandbox re-ranking: values recomputed from your sliders, not the published board. ' : 'Pre-token protocols, strongest implied value first. ') + 'Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Compare' }),
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
             sortHeader('tvl', 'TVL'),
@@ -437,7 +594,9 @@
     shell.appendChild(header());
     shell.appendChild(lede());
     shell.appendChild(controls());
+    shell.appendChild(toolStrip());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
+    if (state.tab === 'pre-token') shell.appendChild(comparePanel());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
