@@ -1,8 +1,12 @@
 // Token Radar's dashboard, radar-3. It reads window.RADAR (written beside
-// dashboard/ by main.ts) and renders the ranked board, a filterable table, a
-// per-protocol detail drawer with the model's own inputs, the live comparables
-// behind each category multiple, and a model sandbox that re-ranks the board
-// live. No network: every byte it shows is in data.js.
+// dashboard/ by main.ts) and window.VALIDATION (written into dashboard/ by
+// main.ts) and renders the ranked board, a filterable table, a per-protocol
+// detail drawer with the model's own inputs and its rank range across the
+// refits, the live comparables behind each category multiple, a "How the
+// model was tested" section with the blind holdout, the walk-forward test,
+// the refit rank ranges and the fitted comps curve, and a model sandbox that
+// re-ranks the board live. No network: every byte it shows is in data.js
+// and validation.js.
 (function () {
   'use strict';
 
@@ -367,6 +371,13 @@
     );
   }
 
+  // The blind holdout's headline, in the board's first screen: the model's mean log error against one flat multiple, on tokens neither was fit on.
+  function holdoutFact() {
+    var v = window.VALIDATION;
+    if (!v) return null;
+    return el('div', { class: 'fact' }, el('span', { text: 'Blind holdout, mean log error' }), el('b', { text: v.holdout.model_male.toFixed(2) + ' vs flat ' + v.holdout.flat_male.toFixed(2) }));
+  }
+
   function lede() {
     return el('section', { class: 'lede' },
       el('div', null,
@@ -378,7 +389,8 @@
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Total implied value' }), el('b', { text: fmtUsd(DATA.total_implied_usd) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
+        el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) })),
+        holdoutFact()
       )
     );
   }
@@ -439,6 +451,7 @@
       },
         el('td', { class: 'compare-cell' }, compareTick(r.slug)),
         el('td', { class: 'num', text: rankLabel }),
+        el('td', { class: 'num', text: r.rank_lo + '–' + r.rank_hi }),
         el('td', null, el('div', { class: 'name' },
           el('b', { text: r.name }),
           el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') + (isWatchlist(r) ? ' · watchlist' : '') }),
@@ -463,6 +476,7 @@
           el('thead', null, el('tr', null,
             el('th', { scope: 'col', text: 'Compare' }),
             sortHeader('implied', 'Rank'),
+            el('th', { scope: 'col', text: 'Rank range' }),
             sortHeader('name', 'Protocol'),
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
@@ -498,6 +512,90 @@
           tbody
         )
       )
+    );
+  }
+
+  // The fitted comps curve: each dot a live-token protocol's market cap
+  // against its TVL, log scale, with the fitted global multiple as a line.
+  // Filled dots are the tokens the blind holdout never fit on.
+  function curveChart() {
+    var v = window.VALIDATION;
+    if (!v || !v.curve || !v.curve.length) return null;
+    var pts = v.curve;
+    var xs = pts.map(function (p) { return p[0]; });
+    var ys = pts.map(function (p) { return p[1]; });
+    var x0 = Math.floor(Math.min.apply(null, xs)), x1 = Math.ceil(Math.max.apply(null, xs));
+    var y0 = Math.floor(Math.min.apply(null, ys)), y1 = Math.ceil(Math.max.apply(null, ys));
+    var W = 560, H = 320, L = 46, R = 26, T = 10, B = 28;
+    function X(x) { return L + (x - x0) / (x1 - x0) * (W - L - R); }
+    function Y(y) { return H - B - (y - y0) / (y1 - y0) * (H - T - B); }
+    function Yc(y) { return Math.min(Math.max(Y(y), Y(y1)), Y(y0)); }
+    var g = Math.log10(v.global_multiple);
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="curve" role="img" aria-label="Market cap against TVL for the live comparables, log scale, with the fitted multiple as a line">';
+    var t;
+    for (t = Math.ceil(x0); t <= x1; t++) {
+      s += '<line x1="' + X(t).toFixed(1) + '" y1="' + Y(y0).toFixed(1) + '" x2="' + X(t).toFixed(1) + '" y2="' + Y(y1).toFixed(1) + '" class="grid"/>';
+      s += '<text x="' + X(t).toFixed(1) + '" y="' + (H - 8) + '" class="axis" text-anchor="middle">' + moneyAxis(t) + '</text>';
+    }
+    for (t = Math.ceil(y0); t <= y1; t++) {
+      s += '<line x1="' + X(x0).toFixed(1) + '" y1="' + Y(t).toFixed(1) + '" x2="' + X(x1).toFixed(1) + '" y2="' + Y(t).toFixed(1) + '" class="grid"/>';
+      s += '<text x="4" y="' + (Y(t) + 3).toFixed(1) + '" class="axis">' + moneyAxis(t) + '</text>';
+    }
+    s += '<line x1="' + X(x0).toFixed(1) + '" y1="' + Yc(x0 + g).toFixed(1) + '" x2="' + X(x1).toFixed(1) + '" y2="' + Yc(x1 + g).toFixed(1) + '" class="fit"/>';
+    pts.forEach(function (p) {
+      s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="3" class="' + (p[2] ? 'pt-test' : 'pt') + '"/>';
+    });
+    s += '</svg>';
+    return el('div', { class: 'chart', html: s });
+  }
+  function moneyAxis(lg) {
+    if (lg >= 9) return '$' + Math.round(Math.pow(10, lg - 9)) + 'B';
+    if (lg >= 6) return '$' + Math.round(Math.pow(10, lg - 6)) + 'M';
+    if (lg >= 3) return '$' + Math.round(Math.pow(10, lg - 3)) + 'K';
+    return '$' + Math.pow(10, lg);
+  }
+
+  // The test, with real numbers from validation.js: the multiples are fit on
+  // the snapshot's own traded tokens, so they can be tested on them — hold
+  // some out, fit on the rest, and ask for market caps the model never saw.
+  function validationPanel() {
+    var v = window.VALIDATION;
+    if (!v) return null;
+    var h = v.holdout, w = v.walk_forward;
+    function errRow(label, n, model, flat, med, medF) {
+      function num(x) { return x === null || x === undefined ? '—' : x.toFixed(2); }
+      return el('tr', null,
+        el('td', { text: label }),
+        el('td', { class: 'num', text: String(n) }),
+        el('td', { class: 'num', text: num(model) }),
+        el('td', { class: 'num', text: num(flat) }),
+        el('td', { class: 'num', text: num(med) }),
+        el('td', { class: 'num', text: num(medF) }));
+    }
+    var folds = v.cv_folds.map(function (f) { return 'fold ' + f.fold + ': ' + f.model_male.toFixed(2) + ' vs ' + f.flat_male.toFixed(2); }).join(' · ');
+    var top10 = v.loo.top10.map(function (t) { return t.rank + ': ' + t.lo + '–' + t.hi; }).join(' · ');
+    return el('section', { class: 'panel validation' },
+      el('h2', { text: 'How the model was tested' }),
+      el('p', { class: 'sub', text: 'The multiples are fit on the snapshot’s own traded tokens, so they can be tested on them: hold some out, fit on the rest, and ask the model for market caps it never saw. The error is the absolute log error — a miss of 2× costs 0.69, of 10× costs 2.30 — because a multiple is a ratio, not a price.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'calib' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Tokens' }), el('th', { scope: 'col', text: 'Model, mean log error' }), el('th', { scope: 'col', text: 'Flat multiple' }), el('th', { scope: 'col', text: 'Model, median log error' }), el('th', { scope: 'col', text: 'Flat, median' }))),
+          el('tbody', null,
+            errRow('Blind holdout — every 5th token by slug', h.test_n, h.model_male, h.flat_male, h.model_med_ale, h.flat_med_ale),
+            errRow('Same fit on its own train slice', h.train_n, h.train_male, null, h.train_med_ale, null),
+            errRow('Five-fold average — every token tested once', v.clean_n, v.cv_model_male, v.cv_flat_male, v.cv_model_med_ale, v.cv_flat_med_ale),
+            errRow('Board scale — five-fold, TVL at the $50M floor and above', v.board_scale_n, v.board_scale_model_male, v.board_scale_flat_male, v.board_scale_model_med_ale, v.board_scale_flat_med_ale),
+            errRow('Walk-forward — fit before 2025, tested on the tokens listed since', w.test_n, w.model_male, w.flat_male, w.model_med_ale, w.flat_med_ale)
+          )
+        )
+      ),
+      el('p', { class: 'sub', text: 'Five folds, one by one (mean log error, model vs flat): ' + folds + '.' }),
+      el('p', { class: 'sub', text: 'What the errors mean: a live token’s market-cap-to-TVL ratio varies about 100× inside its own category, so no multiple predicts one token’s cap closely — the median prediction on the holdout is off by ' + h.model_med_ape.toFixed(0) + '%. The multiple prices the category, not the token. ' + v.excluded_zero_mcap + ' live protocols record a market cap of $0 or less; a log error at zero is undefined, so they are left out of the error test (they still count in the calibration, as the board does).' }),
+      el('h3', { text: 'Rank ranges from refits' }),
+      el('p', { class: 'sub', text: 'Removing any one of the ' + v.anchors_n + ' live comparables and refitting (' + v.loo.refits + ' refits) leaves rank 1 at 1 and rank 2 at 2; the median row moves within a ' + v.loo.median_width + '-rank band and the widest moves ' + v.loo.max_width + '. Resampling the comparables (' + v.bootstrap.refits + ' bootstrap refits, seed ' + v.bootstrap.seed + ') moves the median row within a ' + v.bootstrap.median_width + '-rank band, and rank 1 stays 1–2. Top 10 leave-one-out ranges: ' + top10 + '.' }),
+      el('h3', { text: 'The fitted comps curve' }),
+      curveChart(),
+      el('p', { class: 'sub', text: 'Each dot is a live-token protocol that already trades — its market cap against its TVL, log scale. Filled dots are the ' + h.test_n + ' held out of the fit. The line is the fitted global multiple (' + fmtMult(v.global_multiple) + '): the market pays about a sixth of TVL for a live protocol, and the scatter around the line is why the board ranks by a category multiple with a stated rank range instead of a single number.' })
     );
   }
 
@@ -585,6 +683,11 @@
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    var val = window.VALIDATION || { loo: { refits: 144 }, bootstrap: { refits: 200 } };
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'How sure is this rank?' }),
+      el('p', { class: 'sub', text: 'Removing any one live comparable and refitting (' + val.loo.refits + ' refits) moves this protocol between ranks ' + row.rank_lo + ' and ' + row.rank_hi + '; resampling the comparables (' + val.bootstrap.refits + ' refits, seed ' + (val.bootstrap.seed || 20261114) + ') moves it between ' + row.boot_lo + ' and ' + row.boot_hi + '. Ranks next to each other are near-ties — the top of the board is the stable part, the middle churns.' })
+    ));
     if (comp && row.multiple_source === 'category') {
       dialog.appendChild(el('section', { class: 'detail-section' },
         el('h3', { text: 'Live comparables in ' + (row.category || 'Other') }),
@@ -627,6 +730,7 @@
     shell.appendChild(toolStrip());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(comparePanel());
+    if (state.tab === 'pre-token') { var vp = validationPanel(); if (vp) shell.appendChild(vp); }
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');

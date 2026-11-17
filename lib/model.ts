@@ -170,6 +170,12 @@ export interface RadarRow {
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
+  /** The rank range across the leave-one-out refits: the rank this row takes when any one live comparable is removed. */
+  rank_lo: number;
+  rank_hi: number;
+  /** The rank range across the 200 bootstrap refits. */
+  boot_lo: number;
+  boot_hi: number;
   watchlist: boolean;
 }
 
@@ -570,8 +576,340 @@ export function categoryComps(snapshot: Snapshot, model: ModelConstants = MODEL)
   return rows.sort((a, b) => b.comps - a.comps || (a.category < b.category ? -1 : 1));
 }
 
+/** The live-token anchors the validation can score: a positive market cap and a positive TVL. */
+export function validationAnchors(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+}
+
+/** One fold's out-of-sample error, model against a flat global multiple. */
+export interface FoldError {
+  fold: number;
+  test_n: number;
+  model_male: number;
+  flat_male: number;
+  model_med_ale: number;
+  flat_med_ale: number;
+  model_med_ape: number;
+  flat_med_ape: number;
+  model_within2: number;
+  flat_within2: number;
+}
+
+/** The blind holdout: one slice held out before fitting, scored against the flat multiple and the train slice. */
+export interface HoldoutResult {
+  train_n: number;
+  test_n: number;
+  model_male: number;
+  flat_male: number;
+  model_med_ale: number;
+  flat_med_ale: number;
+  model_med_ape: number;
+  flat_med_ape: number;
+  model_within2: number;
+  flat_within2: number;
+  /** The same fitted model scored on the slice it was fit on, so the reader sees the generalisation gap. */
+  train_male: number;
+  train_med_ale: number;
+}
+
+/** A walk-forward test: fit on the tokens listed before a date, test on the ones listed after it. */
+export interface WalkForwardResult {
+  cutoff: string;
+  train_n: number;
+  test_n: number;
+  model_male: number;
+  flat_male: number;
+  model_med_ale: number;
+  flat_med_ale: number;
+  model_med_ape: number;
+  flat_med_ape: number;
+  model_within2: number;
+  flat_within2: number;
+}
+
+/** What a set of refits did to the board's ranks. */
+export interface RefitSummary {
+  refits: number;
+  median_width: number;
+  max_width: number;
+  never_move: number;
+  top10: { rank: number; lo: number; hi: number }[];
+}
+
+/** Everything the dashboard's "How the model was tested" section shows. All numbers are computed from the snapshot by validateModel, never written by hand. */
+export interface Validation {
+  anchors_n: number;
+  clean_n: number;
+  excluded_zero_mcap: number;
+  holdout: HoldoutResult;
+  cv_folds: FoldError[];
+  cv_model_male: number;
+  cv_flat_male: number;
+  cv_model_med_ale: number;
+  cv_flat_med_ale: number;
+  board_scale_n: number;
+  board_scale_model_male: number;
+  board_scale_flat_male: number;
+  board_scale_model_med_ale: number;
+  board_scale_flat_med_ale: number;
+  walk_forward: WalkForwardResult;
+  loo: RefitSummary;
+  bootstrap: RefitSummary & { seed: number };
+  global_multiple: number;
+  /** Every board row's rank range across the leave-one-out refits, in board order. */
+  loo_lo: number[];
+  loo_hi: number[];
+  /** Every board row's rank range across the 200 bootstrap refits, in board order. */
+  boot_lo: number[];
+  boot_hi: number[];
+  /** The fitted comps curve: [log10 TVL, log10 market cap, in the blind holdout (1) or not (0)] for every anchor. */
+  curve: [number, number, number][];
+}
+
+const round3 = (n: number): number => Math.round(n * 1000) / 1000;
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+/** The median of a list of numbers; NaN when empty. */
+function medianOf(values: number[]): number {
+  if (values.length === 0) return NaN;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** A set of predictions against the market caps they claim: mean and median absolute log error, median absolute percentage error, and how many land within twice the truth. */
+function scorePredictions(preds: number[], actuals: number[]): { male: number; medAle: number; medApe: number; within2: number } {
+  const logs = preds.map((p, i) => Math.abs(Math.log(p) - Math.log(actuals[i]!)));
+  const apes = preds.map((p, i) => Math.abs(p - actuals[i]!) / actuals[i]!);
+  return {
+    male: logs.reduce((a, b) => a + b, 0) / logs.length,
+    medAle: medianOf(logs),
+    medApe: medianOf(apes) * 100,
+    within2: preds.filter((p, i) => p > actuals[i]! / 2 && p < actuals[i]! * 2).length,
+  };
+}
+
+/** The model's and the flat multiple's predictions for a set of live tokens, under one fitted calibration. */
+function predictSet(
+  test: SnapshotProtocol[],
+  asOf: string,
+  multiples: Map<string, number>,
+  global: number,
+  model: ModelConstants,
+): { modelPreds: number[]; flatPreds: number[]; actuals: number[] } {
+  const modelPreds: number[] = [];
+  const flatPreds: number[] = [];
+  const actuals: number[] = [];
+  for (const p of test) {
+    const multiple = round4(multiples.get(p.category ?? 'Other') ?? global);
+    modelPreds.push(impliedValue(p, asOf, multiple, model).implied);
+    flatPreds.push(impliedValue(p, asOf, round4(global), model).implied);
+    actuals.push(p.mcap_usd!);
+  }
+  return { modelPreds, flatPreds, actuals };
+}
+
+/** One fold's error line, from the predictions of the model and the flat multiple. */
+function foldLine(fold: number, modelPreds: number[], flatPreds: number[], actuals: number[]): FoldError {
+  const m = scorePredictions(modelPreds, actuals);
+  const f = scorePredictions(flatPreds, actuals);
+  return {
+    fold,
+    test_n: actuals.length,
+    model_male: round3(m.male),
+    flat_male: round3(f.male),
+    model_med_ale: round3(m.medAle),
+    flat_med_ale: round3(f.medAle),
+    model_med_ape: round1(m.medApe),
+    flat_med_ape: round1(f.medApe),
+    model_within2: m.within2,
+    flat_within2: f.within2,
+  };
+}
+
+/** A deterministic pseudo-random stream, so the bootstrap refits reproduce byte for byte. */
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** The rank range every board row takes across a set of refit boards. */
+function rankRanges(base: BoardRow[], refits: BoardRow[][]): { lo: Map<string, number>; hi: Map<string, number> } {
+  const lo = new Map(base.map((r) => [r.slug, r.rank]));
+  const hi = new Map(base.map((r) => [r.slug, r.rank]));
+  for (const b of refits) {
+    for (const r of b) {
+      if (r.rank < (lo.get(r.slug) ?? Infinity)) lo.set(r.slug, r.rank);
+      if (r.rank > (hi.get(r.slug) ?? -Infinity)) hi.set(r.slug, r.rank);
+    }
+  }
+  return { lo, hi };
+}
+
+/** What a set of refits did to the board's ranks, in one line per summary. */
+function refitSummary(base: BoardRow[], lo: Map<string, number>, hi: Map<string, number>, refits: number): RefitSummary {
+  const widths = base.map((r) => (hi.get(r.slug) ?? r.rank) - (lo.get(r.slug) ?? r.rank));
+  const sorted = [...widths].sort((a, b) => a - b);
+  return {
+    refits,
+    median_width: sorted[Math.floor(sorted.length / 2)] ?? 0,
+    max_width: Math.max(...widths),
+    never_move: widths.filter((w) => w === 0).length,
+    top10: base.slice(0, 10).map((r) => ({ rank: r.rank, lo: lo.get(r.slug) ?? r.rank, hi: hi.get(r.slug) ?? r.rank })),
+  };
+}
+
+/**
+ * The model's test, computed from the snapshot alone: a blind holdout against a flat multiple,
+ * five-fold cross-validation, the same folds at board scale, a walk-forward test by listing date,
+ * leave-one-out refits and 200 seeded bootstrap refits with the rank range each board row takes,
+ * and the fitted comps curve. Deterministic: the same snapshot always gives the same numbers.
+ */
+export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL): Validation {
+  const allLive = snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0);
+  const anchors = validationAnchors(snapshot);
+  const clean = [...anchors].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const { global } = calibrate(snapshot, model);
+
+  // Blind holdout: every fifth anchor by slug, fit on the rest; the same fit scored on its train slice.
+  const test = clean.filter((_, i) => i % 5 === 4);
+  const train = clean.filter((_, i) => i % 5 !== 4);
+  const fit = calibrate({ ...snapshot, protocols: train }, model);
+  const hp = predictSet(test, snapshot.as_of, fit.multiples, fit.global, model);
+  const hm = scorePredictions(hp.modelPreds, hp.actuals);
+  const hf = scorePredictions(hp.flatPreds, hp.actuals);
+  const tp = predictSet(train, snapshot.as_of, fit.multiples, fit.global, model);
+  const tm = scorePredictions(tp.modelPreds, tp.actuals);
+  const holdout: HoldoutResult = {
+    train_n: train.length,
+    test_n: test.length,
+    model_male: round3(hm.male),
+    flat_male: round3(hf.male),
+    model_med_ale: round3(hm.medAle),
+    flat_med_ale: round3(hf.medAle),
+    model_med_ape: round1(hm.medApe),
+    flat_med_ape: round1(hf.medApe),
+    model_within2: hm.within2,
+    flat_within2: hf.within2,
+    train_male: round3(tm.male),
+    train_med_ale: round3(tm.medAle),
+  };
+
+  // Five-fold cross-validation over the same split: every anchor is tested once, blind.
+  const cvFolds: FoldError[] = [];
+  for (let f = 0; f < 5; f++) {
+    const foldTest = clean.filter((_, i) => i % 5 === f);
+    const foldTrain = clean.filter((_, i) => i % 5 !== f);
+    const fc = calibrate({ ...snapshot, protocols: foldTrain }, model);
+    const fp = predictSet(foldTest, snapshot.as_of, fc.multiples, fc.global, model);
+    cvFolds.push(foldLine(f, fp.modelPreds, fp.flatPreds, fp.actuals));
+  }
+  const avg = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  // Board scale: the same five folds over the anchors at the watchlist floor and above.
+  const big = clean.filter((p) => p.tvl_usd >= snapshot.floor_usd);
+  const bigFolds: FoldError[] = [];
+  for (let f = 0; f < 5; f++) {
+    const foldTest = big.filter((_, i) => i % 5 === f);
+    const foldTrain = big.filter((_, i) => i % 5 !== f);
+    const fc = calibrate({ ...snapshot, protocols: foldTrain }, model);
+    const fp = predictSet(foldTest, snapshot.as_of, fc.multiples, fc.global, model);
+    bigFolds.push(foldLine(f, fp.modelPreds, fp.flatPreds, fp.actuals));
+  }
+
+  // Walk-forward: fit on the anchors listed before 2025, test on the ones listed since.
+  const dated = clean.filter((p) => p.listed_at !== null);
+  const wfTrain = dated.filter((p) => p.listed_at! < '2025-01-01');
+  const wfTest = dated.filter((p) => p.listed_at! >= '2025-01-01');
+  const wc = calibrate({ ...snapshot, protocols: wfTrain }, model);
+  const wp = predictSet(wfTest, snapshot.as_of, wc.multiples, wc.global, model);
+  const wm = scorePredictions(wp.modelPreds, wp.actuals);
+  const wf = scorePredictions(wp.flatPreds, wp.actuals);
+  const walkForward: WalkForwardResult = {
+    cutoff: '2025-01-01',
+    train_n: wfTrain.length,
+    test_n: wfTest.length,
+    model_male: round3(wm.male),
+    flat_male: round3(wf.male),
+    model_med_ale: round3(wm.medAle),
+    flat_med_ale: round3(wf.medAle),
+    model_med_ape: round1(wm.medApe),
+    flat_med_ape: round1(wf.medApe),
+    model_within2: wm.within2,
+    flat_within2: wf.within2,
+  };
+
+  // Leave-one-out refits: remove one live anchor at a time, rebuild the board, record every rank.
+  const base = buildBoard(snapshot, model);
+  const looBoards: BoardRow[][] = [];
+  for (const p of allLive) {
+    looBoards.push(buildBoard({ ...snapshot, protocols: snapshot.protocols.filter((q) => q.slug !== p.slug) }, model));
+  }
+  const looRanges = rankRanges(base, looBoards);
+  const loo = refitSummary(base, looRanges.lo, looRanges.hi, allLive.length);
+
+  // Bootstrap refits: resample the anchors with replacement, 200 times, seed fixed.
+  const BOOTSTRAP_SEED = 20261114;
+  const rnd = mulberry32(BOOTSTRAP_SEED);
+  const rest = snapshot.protocols.filter((p) => isPreToken(p) || p.mcap_usd === null || p.tvl_usd <= 0);
+  const bootBoards: BoardRow[][] = [];
+  for (let k = 0; k < 200; k++) {
+    const sampled: SnapshotProtocol[] = [];
+    for (let i = 0; i < allLive.length; i++) sampled.push(allLive[Math.floor(rnd() * allLive.length)]!);
+    bootBoards.push(buildBoard({ ...snapshot, protocols: [...rest, ...sampled] }, model));
+  }
+  const bootRanges = rankRanges(base, bootBoards);
+  const bootstrap: RefitSummary & { seed: number } = { ...refitSummary(base, bootRanges.lo, bootRanges.hi, 200), seed: BOOTSTRAP_SEED };
+
+  // The fitted comps curve: every anchor as [log10 TVL, log10 market cap, in the blind holdout].
+  const testSlugs = new Set(test.map((p) => p.slug));
+  const curve: [number, number, number][] = anchors.map((p) => [
+    round2(Math.log10(p.tvl_usd)),
+    round2(Math.log10(p.mcap_usd!)),
+    testSlugs.has(p.slug) ? 1 : 0,
+  ]);
+
+  return {
+    anchors_n: allLive.length,
+    clean_n: clean.length,
+    excluded_zero_mcap: allLive.length - anchors.length,
+    holdout,
+    cv_folds: cvFolds,
+    cv_model_male: round3(avg(cvFolds.map((f) => f.model_male))),
+    cv_flat_male: round3(avg(cvFolds.map((f) => f.flat_male))),
+    cv_model_med_ale: round3(avg(cvFolds.map((f) => f.model_med_ale))),
+    cv_flat_med_ale: round3(avg(cvFolds.map((f) => f.flat_med_ale))),
+    board_scale_n: big.length,
+    board_scale_model_male: round3(avg(bigFolds.map((f) => f.model_male))),
+    board_scale_flat_male: round3(avg(bigFolds.map((f) => f.flat_male))),
+    board_scale_model_med_ale: round3(avg(bigFolds.map((f) => f.model_med_ale))),
+    board_scale_flat_med_ale: round3(avg(bigFolds.map((f) => f.flat_med_ale))),
+    walk_forward: walkForward,
+    loo,
+    bootstrap,
+    global_multiple: round4(global),
+    loo_lo: base.map((r) => looRanges.lo.get(r.slug) ?? r.rank),
+    loo_hi: base.map((r) => hiOf(looRanges, r)),
+    boot_lo: base.map((r) => bootRanges.lo.get(r.slug) ?? r.rank),
+    boot_hi: base.map((r) => hiOf(bootRanges, r)),
+    curve,
+  };
+}
+
+/** One row's high end of a rank range. */
+function hiOf(ranges: { lo: Map<string, number>; hi: Map<string, number> }, row: BoardRow): number {
+  return ranges.hi.get(row.slug) ?? row.rank;
+}
+
 /** A board row's compact form for data.js, with the farm plan generated in the page. */
-export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
+export function radarRow(row: BoardRow, watchlist: Set<string>, loo: [number, number], boot: [number, number]): RadarRow {
   return {
     rank: row.rank,
     slug: row.slug,
@@ -590,13 +928,18 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
+    rank_lo: loo[0],
+    rank_hi: loo[1],
+    boot_lo: boot[0],
+    boot_hi: boot[1],
     watchlist: watchlist.has(row.slug),
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
+/** Everything the dashboard renders, from the snapshot. The validation is computed once here, so the board's rank ranges and the generated validation.js carry the same numbers. */
+export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData; validation: Validation } {
   const board = buildBoard(snapshot, model);
+  const validation = validateModel(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const wl = new Set(snapshot.watchlist);
@@ -613,11 +956,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     total_implied_usd: board.reduce((n, r) => n + r.implied_value_usd, 0),
     global_multiple: round4(calibrate(snapshot, model).global),
     live_total: snapshot.protocols.filter((p) => !isPreToken(p)).length,
-    rows: board.map((r) => radarRow(r, wl)),
+    rows: board.map((r, i) => radarRow(r, wl, [validation.loo_lo[i]!, validation.loo_hi[i]!], [validation.boot_lo[i]!, validation.boot_hi[i]!])),
     live,
     comps: categoryComps(snapshot, model),
   };
-  return { board, radar };
+  return { board, radar, validation };
 }
 
 /** The snapshot out of a file's text, refused unless it is the shape the model scores. */
@@ -686,4 +1029,10 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
 /** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network. */
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
+}
+
+/** The validation as a dashboard script: the page reads window.VALIDATION, and the dossier's source shows the numbers whole. The per-row rank ranges are left out here — the board's rows already carry them in data.js — so the dashboard's source stays inside its byte cap. */
+export function validationScript(validation: Validation): string {
+  const { loo_lo: _looLo, loo_hi: _looHi, boot_lo: _bootLo, boot_hi: _bootHi, ...shown } = validation;
+  return `window.VALIDATION=${JSON.stringify(shown)};\n`;
 }

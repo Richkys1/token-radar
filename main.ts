@@ -2,10 +2,13 @@
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every pre-token protocol with the radar-3 model in lib/model.ts,
-// writes the ranked board to /output/board.json and the dashboard's data to
-// /output/data.js, copies this repository's dashboard/ and screenshots/ to
-// /output, and writes /output/dossier.json with the vendored make.fun
-// library. Deterministic: the same snapshot always writes the same bytes.
+// validates the model blind against the snapshot's own traded tokens
+// (lib/model.ts: validateModel), writes the ranked board to /output/board.json
+// and the dashboard's data to /output/data.js, writes the validation to
+// /output/dashboard/validation.js so the dossier's source shows the test's
+// numbers, copies this repository's dashboard/ and screenshots/ to /output,
+// and writes /output/dossier.json with the vendored make.fun library.
+// Deterministic: the same snapshot always writes the same bytes.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -13,7 +16,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, parseSnapshot, validationScript } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -40,7 +43,7 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar } = buildRadar(snapshot);
+const { board, radar, validation } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
@@ -68,6 +71,8 @@ function copyFiles(from: string, to: string): string[] {
 
 const dash = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
+// The validation is written into the copied dashboard, so the dossier's source shows the test's numbers.
+writeFileSync(join(out, 'dashboard', 'validation.js'), validationScript(validation));
 if (shots.length < 3) {
   process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
   process.exit(1);
@@ -84,5 +89,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dash.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+    `token radar: blind holdout ${validation.holdout.test_n} tokens: model mean log error ${validation.holdout.model_male} vs flat ${validation.holdout.flat_male}; 5-fold ${validation.cv_model_male} vs ${validation.cv_flat_male}; ${validation.loo.refits} leave-one-out + ${validation.bootstrap.refits} bootstrap refits\n` +
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dash.length + 1} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

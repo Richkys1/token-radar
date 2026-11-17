@@ -248,3 +248,14 @@ tbody tr[data-selected="true"] { background: rgba(45, 212, 167, 0.08); }
   align-content: center;
   min-height: 220px;
 }
+
+/* The validation section: the fitted comps curve and its chart. */
+.validation h3 { margin-top: var(--step-5); }
+.validation p + h3 { margin-top: var(--step-5); }
+.chart { margin-top: var(--step-3); }
+.curve { display: block; width: 100%; max-width: 720px; height: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.curve .grid { stroke: var(--border); stroke-width: 1; }
+.curve .fit { stroke: var(--accent); stroke-width: 2; }
+.curve .pt { fill: var(--surface); stroke: var(--info); stroke-width: 1.5; }
+.curve .pt-test { fill: var(--warn); stroke: var(--warn); }
+.curve .axis { fill: var(--muted); font-size: 10px; font-family: var(--font-num); }
