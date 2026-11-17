@@ -1,4 +1,4 @@
-// Token Radar's model, radar-2: one sealed snapshot in, one ranked board out.
+// Token Radar's model, radar-3: one sealed snapshot in, one ranked board out.
 //
 // The board covers every slug on the snapshot's watchlist (the floor, never the
 // ceiling) and adds the early radar: pre-token protocols below the watchlist
@@ -11,10 +11,15 @@
 //
 // Implied value follows only from the snapshot's own figures:
 //
-//   category multiple = median(market cap / TVL) of the live-token protocols
-//                         in the same category (at least 3 of them; otherwise
-//                         the global median over all live protocols),
-//                         clamped to [0.05, 1.00]
+//   category multiple = a shrunken median of the live-token protocols' market
+//                         cap / TVL in the same category: the category's own
+//                         median, winsorized to [0.01, 10] so one wild comp
+//                         cannot set the price, pulled toward the global
+//                         median with weight k = 3, so a category with one or
+//                         two comparables still uses what it knows instead of
+//                         falling back to the global median whole. A category
+//                         with no live comparable at all takes the global
+//                         median. Every multiple is clamped to [0.05, 1.00].
 //   growth            = clamp(change_7d, -60, 120) per cent
 //   growthMult        = 1 + (growth / 100) x GROWTH_WEIGHT
 //   maturity          = 0.6 + min(age_days, 1095) / 1095 x 0.4
@@ -26,9 +31,18 @@
 // The category multiple is the model's core: it prices a protocol at what the
 // market already pays for the same kind of protocol, instead of one flat
 // multiple for everything. A lending protocol is not a bridge, and the market
-// does not price them alike. No protocol name is ever special-cased: the same
-// function scores every row, and the calibration table is published in the
-// dashboard so a reader can check it.
+// does not price them alike. Shrinkage is the honest part: a category with a
+// single live comparable does not deserve that comparable's exact ratio, and
+// a category with none does not deserve the global median's either — the
+// blend says how much each is worth. No protocol name is ever special-cased:
+// the same function scores every row, and the calibration table is published
+// in the dashboard so a reader can check it, raw median beside shrunk
+// multiple.
+//
+// Each farm plan carries seven steps, the second a risk check drawn from the
+// protocol's own figures: a steep seven-day TVL fall, a protocol younger
+// than 90 days, or a single-chain deployment each gets its own warning,
+// cost and time.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -67,6 +81,11 @@ export interface ModelConstants {
   min_comps: number;
   breadth_per_chain: number;
   breadth_max_chains: number;
+  /** How much weight the global median carries when a category's own median is shrunk toward it. */
+  shrinkage_k: number;
+  /** Winsorize every live comparable's market-cap-to-TVL ratio into this band before taking a median. */
+  ratio_floor: number;
+  ratio_cap: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -82,10 +101,13 @@ export const MODEL: ModelConstants = {
   min_comps: 3,
   breadth_per_chain: 0.02,
   breadth_max_chains: 4,
+  shrinkage_k: 3,
+  ratio_floor: 0.01,
+  ratio_cap: 10,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols the early radar carries, by TVL. */
 export const EARLY_ROWS = 200;
@@ -167,7 +189,10 @@ export interface LiveRow {
 export interface CategoryComp {
   category: string;
   comps: number;
+  /** The multiple the board actually uses: the category's median, shrunk toward the global median. */
   median_multiple: number;
+  /** The category's own winsorized median before shrinkage, so a reader can see what the blend did. */
+  raw_median: number;
   top: { slug: string; name: string; multiple: number }[];
 }
 
@@ -262,16 +287,19 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 
 /**
  * The market's own price for each category: the median market-cap-to-TVL
- * ratio of the live-token protocols in it. Categories with too few live
- * comparables fall back to the global median. Every multiple is clamped.
+ * ratio of the live-token protocols in it, winsorized so one wild comparable
+ * cannot set the price, then shrunk toward the global median so a category
+ * with one or two comparables still uses what it knows instead of falling
+ * back to the global median whole. A category with no live comparable takes
+ * the global median. Every multiple is clamped.
  */
-export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): { multiples: Map<string, number>; comps: Map<string, number>; global: number } {
+export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): { multiples: Map<string, number>; comps: Map<string, number>; global: number; rawMedians: Map<string, number> } {
   const byCategory = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
     if (isPreToken(p)) continue;
     if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
-    const ratio = p.mcap_usd / p.tvl_usd;
+    const ratio = Math.min(model.ratio_cap, Math.max(model.ratio_floor, p.mcap_usd / p.tvl_usd));
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
     all.push(ratio);
     const key = p.category ?? 'Other';
@@ -282,11 +310,18 @@ export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): { 
   const global = Math.min(model.multiple_cap, Math.max(model.multiple_floor, median(all)));
   const multiples = new Map<string, number>();
   const comps = new Map<string, number>();
+  const rawMedians = new Map<string, number>();
   for (const [cat, ratios] of byCategory) {
     comps.set(cat, ratios.length);
-    multiples.set(cat, ratios.length >= model.min_comps ? Math.min(model.multiple_cap, Math.max(model.multiple_floor, median(ratios))) : global);
+    const raw = median(ratios);
+    rawMedians.set(cat, raw);
+    // Shrinkage: n comparables pull the category's own median with weight n,
+    // the global median with weight k. At n = 0 the category takes the global
+    // median outright; at large n the category's own median rules.
+    const shrunk = (ratios.length * raw + model.shrinkage_k * global) / (ratios.length + model.shrinkage_k);
+    multiples.set(cat, Math.min(model.multiple_cap, Math.max(model.multiple_floor, shrunk)));
   }
-  return { multiples, comps, global };
+  return { multiples, comps, global, rawMedians };
 }
 
 /** The three multipliers and the implied value one protocol gets under `model`. */
@@ -332,7 +367,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     // lands on the exact same implied value the board carries.
     const rawMultiple = multiples.get(p.category ?? 'Other') ?? global;
     const multiple = round4(rawMultiple);
-    const source: 'category' | 'global' = (comps.get(p.category ?? 'Other') ?? 0) >= model.min_comps ? 'category' : 'global';
+    // With shrinkage the multiple always uses the category's own comparables
+    // when it has any; only a category with none takes the global median.
+    const source: 'category' | 'global' = (comps.get(p.category ?? 'Other') ?? 0) > 0 ? 'category' : 'global';
     const { implied, growthPct, growthMult, maturityMult, breadthMult, age } = impliedValue(p, snapshot.as_of, multiple, model);
     return { p, multiple, source, implied, growthPct, growthMult, maturityMult, breadthMult, age, compsUsed: comps.get(p.category ?? 'Other') ?? 0 };
   });
@@ -418,8 +455,44 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
- * the protocol's own record (category, chains, TVL and age), never from a hand-written list of names.
+ * A protocol's risk check, drawn from its own figures: a steep seven-day
+ * TVL fall, a protocol younger than 90 days, or a single-chain deployment
+ * each gets its own warning, cost and time. A protocol with none of the
+ * three gets a reminder to keep the position active across snapshots.
+ */
+export function riskStep(p: SnapshotProtocol, age: number | null): FarmStep {
+  const growth = p.change_7d ?? 0;
+  if (growth <= -20) {
+    return {
+      text: `TVL fell ${Math.round(-growth)}% in the last week — read the protocol's own announcements and check for an exploit or an ended incentive before you add more capital.`,
+      cost: 'nothing to check',
+      time: '10 minutes',
+    };
+  }
+  if (age !== null && age < 90) {
+    return {
+      text: `The protocol is less than 90 days old — start with half the position above, confirm the contracts are the ones its own page links to, and scale up only after a month.`,
+      cost: 'half the capital above',
+      time: '15 minutes',
+    };
+  }
+  if (p.chains.length <= 1) {
+    return {
+      text: `The protocol runs on one chain (${chainOf(p)}) — keep a small balance there for gas and for the exit transaction, so a withdrawal never strands the position.`,
+      cost: 'about $5 of the chain asset',
+      time: '5 minutes',
+    };
+  }
+  return {
+    text: `Set a reminder for the next weekly action and the next snapshot, so the position stays active across snapshots.`,
+    cost: 'nothing but the reminder',
+    time: '5 minutes',
+  };
+}
+
+/**
+ * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is derived from
+ * the protocol's own record (category, chains, TVL, growth and age), never from a hand-written list of names.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -431,6 +504,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
+    riskStep(p, age),
     {
       text: actionFor(p, capital, chain),
       cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
@@ -479,19 +553,19 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 
 /** One category's calibration table, for the dashboard's methodology section. */
 export function categoryComps(snapshot: Snapshot, model: ModelConstants = MODEL): CategoryComp[] {
-  const { multiples, comps } = calibrate(snapshot, model);
+  const { multiples, comps, rawMedians } = calibrate(snapshot, model);
   const byCategory = new Map<string, { slug: string; name: string; multiple: number }[]>();
   for (const p of snapshot.protocols) {
     if (isPreToken(p) || p.mcap_usd === null || p.tvl_usd <= 0) continue;
     const key = p.category ?? 'Other';
     const list = byCategory.get(key) ?? [];
-    list.push({ slug: p.slug, name: p.name, multiple: p.mcap_usd / p.tvl_usd });
+    list.push({ slug: p.slug, name: p.name, multiple: Math.min(model.ratio_cap, Math.max(model.ratio_floor, p.mcap_usd / p.tvl_usd)) });
     byCategory.set(key, list);
   }
   const rows: CategoryComp[] = [];
   for (const [cat, list] of byCategory) {
     const top = [...list].sort((a, b) => b.multiple - a.multiple).slice(0, 3).map((t) => ({ slug: t.slug, name: t.name, multiple: round4(t.multiple) }));
-    rows.push({ category: cat, comps: comps.get(cat) ?? 0, median_multiple: round4(multiples.get(cat) ?? 0), top });
+    rows.push({ category: cat, comps: comps.get(cat) ?? 0, median_multiple: round4(multiples.get(cat) ?? 0), raw_median: round4(rawMedians.get(cat) ?? 0), top });
   }
   return rows.sort((a, b) => b.comps - a.comps || (a.category < b.category ? -1 : 1));
 }

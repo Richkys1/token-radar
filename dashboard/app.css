@@ -105,6 +105,10 @@ tbody tr[data-selected="true"] { background: rgba(45, 212, 167, 0.08); }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .status.live::before { background: var(--info); }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--accent-dim); color: var(--accent); font-size: 11px; font-family: var(--font-num); }
+.flags { display: flex; flex-wrap: wrap; gap: var(--step-1); margin-top: 2px; }
+.flag { display: inline-block; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); font-size: 11px; font-family: var(--font-num); line-height: 1.6; white-space: nowrap; }
+.flag-warn { border-color: var(--warn); color: var(--warn); }
+.flag-info { border-color: var(--info); color: var(--info); }
 
 .model { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; background: var(--canvas); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--step-3) var(--step-4); }
